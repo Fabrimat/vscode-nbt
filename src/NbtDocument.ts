@@ -102,6 +102,10 @@ export class NbtDocument extends Disposable implements vscode.CustomDocument {
 			// bedrock mcstructure files don't have DataVersion, use the latest release instead
 			return undefined
 		} else {
+			// for .litematic files
+			if (this.uri.fsPath.endsWith('.litematic')) {
+				return file.root.getNumber('MinecraftDataVersion')
+			}
 			return file.root.getNumber('DataVersion') ?? 0
 		}
 	}
