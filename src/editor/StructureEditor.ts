@@ -20,10 +20,8 @@ export class StructureEditor implements EditorPanel {
 	protected structure: StructureProvider
 	private readonly warning: HTMLDivElement
 	private readonly canvas: HTMLCanvasElement
-	private readonly canvas2: HTMLCanvasElement
-	private readonly gl2: WebGLRenderingContext
+	private readonly gl: WebGLRenderingContext
 	protected readonly renderer: StructureRenderer
-	protected readonly renderer2: StructureRenderer
 
 	private renderRequested = false
 
@@ -47,14 +45,9 @@ export class StructureEditor implements EditorPanel {
 
 		this.canvas = document.createElement('canvas')
 		this.canvas.className = 'structure-3d'
-		const gl = this.canvas.getContext('webgl')!
+		this.gl = this.canvas.getContext('webgl')!
 		this.structure = new Structure([0, 0, 0])
-		this.renderer = new StructureRenderer(gl, this.structure, this.resources)
-
-		this.canvas2 = document.createElement('canvas')
-		this.canvas2.className = 'structure-3d click-detection'
-		this.gl2 = this.canvas2.getContext('webgl')!
-		this.renderer2 = new StructureRenderer(this.gl2, this.structure, this.resources)
+		this.renderer = new StructureRenderer(this.gl, this.structure, this.resources)
 
 		this.warning = document.createElement('div')
 		this.warning.className = 'nbt-warning'
@@ -165,14 +158,6 @@ export class StructureEditor implements EditorPanel {
 	}
 
 	resize() {
-		const displayWidth2 = this.canvas2.clientWidth
-		const displayHeight2 = this.canvas2.clientHeight
-		if (this.canvas2.width !== displayWidth2 || this.canvas2.height !== displayHeight2) {
-			this.canvas2.width = displayWidth2
-			this.canvas2.height = displayHeight2
-			this.renderer2.setViewport(0, 0, this.canvas2.width, this.canvas2.height)
-		}
-
 		const displayWidth = this.canvas.clientWidth
 		const displayHeight = this.canvas.clientHeight
 		if (this.canvas.width !== displayWidth || this.canvas.height !== displayHeight) {
@@ -187,7 +172,6 @@ export class StructureEditor implements EditorPanel {
 	reveal() {
 		this.root.append(this.warning)
 		this.root.append(this.canvas)
-		this.root.append(this.canvas2)
 		this.showSidePanel()
 		document.addEventListener('keydown', this.onKeyDown)
 		document.addEventListener('keyup', this.onKeyUp)
@@ -294,9 +278,7 @@ export class StructureEditor implements EditorPanel {
 	private buildStructure() {
 		const isLarge = this.isLarge()
 		this.renderer.useInvisibleBlocks = !isLarge
-		this.renderer2.useInvisibleBlocks = !isLarge
 		this.renderer.setStructure(this.structure)
-		this.renderer2.setStructure(this.structure)
 	}
 
 	menu() {
@@ -335,9 +317,12 @@ export class StructureEditor implements EditorPanel {
 
 	private selectBlock(x: number, y: number) {
 		const viewMatrix = this.getViewMatrix()
-		this.renderer2.drawColoredStructure(viewMatrix)
+		// ponytail: pick by drawing the id-colored pass into the visible canvas (a second renderer doubled the mesh building), then redraw below
+		this.gl.clear(this.gl.COLOR_BUFFER_BIT | this.gl.DEPTH_BUFFER_BIT)
+		this.renderer.drawColoredStructure(viewMatrix)
 		const color = new Uint8Array(4)
-		this.gl2.readPixels(x, this.canvas2.height - y, 1, 1, this.gl2.RGBA, this.gl2.UNSIGNED_BYTE, color)
+		this.gl.readPixels(x, this.canvas.height - y, 1, 1, this.gl.RGBA, this.gl.UNSIGNED_BYTE, color)
+		this.gl.clear(this.gl.COLOR_BUFFER_BIT | this.gl.DEPTH_BUFFER_BIT)
 		const oldSelectedBlock = this.selectedBlock ? [...this.selectedBlock] : null
 		if (color[3] === 255) {
 			this.selectedBlock = [color[0], color[1], color[2]]
@@ -346,8 +331,8 @@ export class StructureEditor implements EditorPanel {
 		}
 		if (JSON.stringify(oldSelectedBlock) !== JSON.stringify(this.selectedBlock)) {
 			this.showSidePanel()
-			this.render()
 		}
+		this.render()
 	}
 
 	protected showSidePanel() {

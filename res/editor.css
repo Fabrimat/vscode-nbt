@@ -285,11 +285,6 @@ span.nbt-value {
   border: none;
 }
 
-.structure-3d.click-detection {
-	z-index: -1;
-	image-rendering: pixelated;
-}
-
 .texture-atlas {
   display: none;
 }
@@ -430,13 +425,18 @@ span.nbt-value {
 	font-family: var(--monospace);
 	font-size: 14px;
 	width: 100%;
+	height: calc(100vh - 80px);
+	display: block;
 	border: none;
 	outline: none !important;
 	resize: none;
 	white-space: pre;
   overflow-wrap: normal;
-  overflow-x: scroll;
-	overflow-y: hidden;
+	overflow: auto;
+}
+
+.region-menu ~ .nbt-editor .snbt-editor {
+	height: calc(100vh - 95px);
 }
 
 .snbt-editor::selection {

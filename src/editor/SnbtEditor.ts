@@ -48,7 +48,6 @@ export class SnbtEditor implements EditorPanel {
 	// textContent only sets the default value, which is ignored once the user has edited the textarea
 	private setText(textarea: HTMLTextAreaElement) {
 		textarea.value = this.snbt
-		textarea.rows = (this.snbt.match(/\n/g)?.length ?? 0) + 1
 	}
 
 	onUpdate(file: NbtFile) {
