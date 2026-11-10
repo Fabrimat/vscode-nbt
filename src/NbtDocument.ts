@@ -1,9 +1,33 @@
 import type { NbtChunk } from 'deepslate'
-import { NbtFile, NbtRegion, NbtType } from 'deepslate'
+import { NbtFile, NbtRegion, NbtType, RawDataInput } from 'deepslate'
 import * as vscode from 'vscode'
 import { applyEdit, reverseEdit } from './common/Operations'
 import type { Logger, NbtEdit } from './common/types'
 import { Disposable } from './dispose'
+
+// Workaround for deepslate reading the string length as a signed short, so strings over 32767 bytes get a bogus length and overflow the stack while decoding (upstream #87). Drop this once deepslate reads it unsigned.
+RawDataInput.prototype.readString = function(this: RawDataInput) {
+	const bytes = this.readBytes(this.readShort() & 0xFFFF)
+	const units: number[] = []
+	for (let i = 0; i < bytes.length; i++) {
+		const b = bytes[i]
+		if (b < 0x80) {
+			units.push(b)
+		} else if ((b & 0xE0) === 0xC0) {
+			units.push(((b & 0x1F) << 6) | (bytes[++i] & 0x3F))
+		} else if ((b & 0xF0) === 0xE0) {
+			units.push(((b & 0x0F) << 12) | ((bytes[++i] & 0x3F) << 6) | (bytes[++i] & 0x3F))
+		} else {
+			const c = ((b & 0x07) << 18) | ((bytes[++i] & 0x3F) << 12) | ((bytes[++i] & 0x3F) << 6) | (bytes[++i] & 0x3F)
+			units.push(0xD800 + ((c - 0x10000) >> 10), 0xDC00 + ((c - 0x10000) & 0x3FF))
+		}
+	}
+	let result = ''
+	for (let i = 0; i < units.length; i += 4096) {
+		result += String.fromCharCode(...units.slice(i, i + 4096))
+	}
+	return result
+}
 
 export class NbtDocument extends Disposable implements vscode.CustomDocument {
 
@@ -46,7 +70,14 @@ export class NbtDocument extends Disposable implements vscode.CustomDocument {
 		} catch (e) {
 			// if reading throws, we try to read using opposite endianness
 			littleEndian = !littleEndian
-			file = NbtFile.read(array, { littleEndian, bedrockHeader: littleEndian })
+			try {
+				file = NbtFile.read(array, { littleEndian, bedrockHeader: littleEndian })
+			} catch {
+				// report the first error, the retry's error is usually misleading
+				throw e instanceof Error && e.message === 'Top tag should be a compound'
+					? new Error('Top tag should be a compound, other root tag types are not supported')
+					: e
+			}
 		}
 
 		logger.info(`Parsed NBT [compression=${file.compression ?? 'none'}, littleEndian=${file.littleEndian ?? false}, bedrockHeader=${file.bedrockHeader ?? 'none'}]`)
