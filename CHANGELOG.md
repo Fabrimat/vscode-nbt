@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1
+
+* Updated README screenshots
+
 ## 1.0.0
 
 First release as NBT Plus for VS Code, a maintained continuation of misode's NBT Viewer. Includes all upstream changes up to 0.9.7.
