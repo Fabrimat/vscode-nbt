@@ -142,11 +142,17 @@ div:last-child > .nbt-body {
 	line-height: 1;
 }
 
-.nbt-tag input {
+.nbt-tag input,
+.nbt-tag textarea {
 	padding: 1px 2px;
 	width: 250px;
 	font-family: var(--monospace);
 	font-size: 14px;
+}
+
+.nbt-tag textarea {
+	vertical-align: top;
+	resize: vertical;
 }
 
 .nbt-tag button {

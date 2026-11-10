@@ -1,4 +1,5 @@
-import { NbtByte, NbtChunk, NbtCompound, NbtDouble, NbtEnd, NbtFile, NbtFloat, NbtInt, NbtLong, NbtRegion, NbtShort, NbtString, NbtTag, NbtType } from 'deepslate'
+import type { NbtCompound, NbtFile } from 'deepslate'
+import { NbtByte, NbtChunk, NbtDouble, NbtFloat, NbtInt, NbtLong, NbtRegion, NbtShort, NbtString, NbtTag, NbtType } from 'deepslate'
 import { NbtPath } from './NbtPath'
 import type { Logger, NbtEdit } from './types'
 
@@ -73,7 +74,23 @@ export function applyEditTag(tag: NbtTag, edit: NbtEdit, logger?: Logger) {
 	logger?.info(`Applying edit ${editToString(edit)}`)
 	try {
 		if (edit.type === 'composite') {
-			edit.edits.forEach(edit => applyEditTag(tag, edit, logger))
+			// Atomic: if a sub-edit fails, undo the ones already applied.
+			const applied: NbtEdit[] = []
+			try {
+				for (const sub of edit.edits) {
+					applyEditTag(tag, sub, logger)
+					applied.push(sub)
+				}
+			} catch (e) {
+				for (const done of applied.reverse()) {
+					try {
+						applyEditTag(tag, reverseEdit(done), logger)
+					} catch (re) {
+						logger?.error(`Error rolling back edit: ${re.message}`)
+					}
+				}
+				throw e
+			}
 			return
 		} else if (edit.type === 'chunk') {
 			throw new Error('Cannot apply chunk edit to a tag')
@@ -126,44 +143,63 @@ export function getNode(tag: NbtTag, path: NbtPath) {
 }
 
 function moveNode(tag: NbtTag, last: number | string, sTag: NbtTag, sLast: number | string) {
+	if (tag === sTag && last === sLast) {
+		return
+	}
+	if (tag.isCompound() && typeof last === 'string' && tag.has(last)) {
+		throw new Error(`Cannot move, '${last}' already exists`)
+	}
 	const value = getNode(sTag, new NbtPath([sLast]))
 	addValue(tag, last, value)
 	removeValue(sTag, sLast)
 }
 
+function mismatch(tag: NbtTag, last: number | string): never {
+	throw new Error(`Cannot access '${last}' on ${NbtType[tag.getId()]}`)
+}
+
 function setValue(tag: NbtTag, last: number | string, value: NbtTag) {
 	if (tag.isCompound() && typeof last === 'string') {
 		tag.set(last, value)
-	} else if (tag.isList() && typeof last === 'number') {
+	} else if (tag.isList() && typeof last === 'number' && last >= 0 && last < tag.length) {
 		tag.set(last, value)
-	} else if (tag.isByteArray() && typeof last === 'number' && value.isByte()) {
+	} else if (tag.isByteArray() && typeof last === 'number' && last >= 0 && last < tag.length && value.isByte()) {
 		tag.set(last, value)
-	} else if (tag.isIntArray() && typeof last === 'number' && value.isInt()) {
+	} else if (tag.isIntArray() && typeof last === 'number' && last >= 0 && last < tag.length && value.isInt()) {
 		tag.set(last, value)
-	} else if (tag.isLongArray() && typeof last === 'number' && value.isLong()) {
+	} else if (tag.isLongArray() && typeof last === 'number' && last >= 0 && last < tag.length && value.isLong()) {
 		tag.set(last, value)
+	} else {
+		mismatch(tag, last)
 	}
 }
 
 function addValue(tag: NbtTag, last: number | string, value: NbtTag) {
 	if (tag.isCompound() && typeof last === 'string') {
+		if (tag.has(last)) {
+			throw new Error(`Cannot add, '${last}' already exists`)
+		}
 		tag.set(last, value)
-	} else if (tag.isList() && typeof last === 'number') {
+	} else if (tag.isList() && typeof last === 'number' && last >= 0 && last <= tag.length) {
 		tag.insert(last, value)
-	} else if (tag.isByteArray() && typeof last === 'number' && value.isByte()) {
+	} else if (tag.isByteArray() && typeof last === 'number' && last >= 0 && last <= tag.length && value.isByte()) {
 		tag.insert(last, value)
-	} else if (tag.isIntArray() && typeof last === 'number' && value.isInt()) {
+	} else if (tag.isIntArray() && typeof last === 'number' && last >= 0 && last <= tag.length && value.isInt()) {
 		tag.insert(last, value)
-	} else if (tag.isLongArray() && typeof last === 'number' && value.isLong()) {
+	} else if (tag.isLongArray() && typeof last === 'number' && last >= 0 && last <= tag.length && value.isLong()) {
 		tag.insert(last, value)
+	} else {
+		mismatch(tag, last)
 	}
 }
 
 function removeValue(tag: NbtTag, last: number | string) {
-	if (tag.isCompound() && typeof last === 'string') {
+	if (tag.isCompound() && typeof last === 'string' && tag.has(last)) {
 		tag.delete(last)
-	} else if (tag.isListOrArray() && typeof last === 'number') {
+	} else if (tag.isListOrArray() && typeof last === 'number' && last >= 0 && last < tag.length) {
 		tag.delete(last)
+	} else {
+		mismatch(tag, last)
 	}
 }
 
@@ -225,15 +261,30 @@ function matchesValue(tag: NbtTag, value: string, parsedValue: NbtTag | undefine
 	return false
 }
 
-export function replaceNode(tag: NbtTag, path: NbtPath, replace: SearchQuery): NbtEdit {
+/**
+ * Builds the edit for replacing a search result, or null if nothing applies to this node.
+ * Throws if the new value cannot be parsed or the new name is already taken.
+ * `claimed` collects the new paths of previous renames (for replace-all), so they cannot collide.
+ */
+export function replaceNode(tag: NbtTag, path: NbtPath, replace: SearchQuery, claimed?: Set<string>): NbtEdit | null {
 	const edits: NbtEdit[] = []
-	if (replace.value) {
-		const node = getNode(tag, path)
+	const node = getNode(tag, path)
+	if (replace.value && !node.isCompound() && !node.isListOrArray()) {
 		const newNode = parsePrimitive(node.getId(), replace.value)
 		edits.push({ type: 'set', path: path.arr, old: node.toJsonWithId(), new: newNode.toJsonWithId() })
 	}
-	if (replace.name) {
-		edits.push({ type: 'move', source: path.arr, path: path.pop().push(replace.name).arr })
+	if (replace.name && typeof path.last() === 'string' && replace.name !== path.last()) {
+		const target = path.pop().push(replace.name)
+		const key = JSON.stringify(target.arr)
+		const parent = getNode(tag, path.pop())
+		if (claimed?.has(key) || (parent.isCompound() && parent.has(replace.name))) {
+			throw new Error(`Cannot rename to '${replace.name}', it already exists`)
+		}
+		claimed?.add(key)
+		edits.push({ type: 'move', source: path.arr, path: target.arr })
+	}
+	if (edits.length === 0) {
+		return null
 	}
 	if (edits.length === 1) {
 		return edits[0]
@@ -248,24 +299,54 @@ export function serializePrimitive(tag: NbtTag) {
 	return ''
 }
 
+function parseInteger(name: string, value: string, min: number, max: number) {
+	const trimmed = value.trim()
+	if (!/^[+-]?\d+$/.test(trimmed)) {
+		throw new Error(`Invalid ${name} value '${value}'`)
+	}
+	const parsed = Number(trimmed)
+	if (parsed < min || parsed > max) {
+		throw new Error(`${name} value '${value}' is out of range (${min} to ${max})`)
+	}
+	return parsed
+}
+
+function parseLong(value: string) {
+	const trimmed = value.trim().replace(/[lL]$/, '')
+	if (!/^[+-]?\d+$/.test(trimmed)) {
+		throw new Error(`Invalid Long value '${value}'`)
+	}
+	const parsed = BigInt(trimmed)
+	if (BigInt.asIntN(64, parsed) !== parsed) {
+		throw new Error(`Long value '${value}' is out of range`)
+	}
+	return parsed
+}
+
 export function parsePrimitive(id: number, value: string) {
 	switch (id) {
 		case NbtType.String: return new NbtString(value)
-		case NbtType.Byte: return new NbtByte(parseInt(value))
-		case NbtType.Short: return new NbtShort(parseInt(value))
-		case NbtType.Int: return new NbtInt(parseInt(value))
-		case NbtType.Long: return new NbtLong(BigInt(value))
-		case NbtType.Float: return new NbtFloat(parseFiniteFloat(value))
-		case NbtType.Double: return new NbtDouble(parseFiniteFloat(value))
-		default: return NbtEnd.INSTANCE
+		case NbtType.Byte: return new NbtByte(parseInteger('Byte', value, -128, 127))
+		case NbtType.Short: return new NbtShort(parseInteger('Short', value, -32768, 32767))
+		case NbtType.Int: return new NbtInt(parseInteger('Int', value, -2147483648, 2147483647))
+		case NbtType.Long: return new NbtLong(parseLong(value))
+		case NbtType.Float: return new NbtFloat(parseFloatValue('Float', value))
+		case NbtType.Double: return new NbtDouble(parseFloatValue('Double', value))
+		default: throw new Error(`Cannot parse a value of type ${NbtType[id] ?? id}`)
 	}
 }
 
-function parseFiniteFloat(value: string) {
+function parseFloatValue(name: string, value: string) {
 	const trimmed = value.trim()
 	if (trimmed === 'NaN') return Number.NaN
 	if (trimmed === 'Infinity' || trimmed === '+Infinity') return Number.POSITIVE_INFINITY
 	if (trimmed === '-Infinity') return Number.NEGATIVE_INFINITY
+	if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?[fFdD]?$/.test(trimmed)) {
+		throw new Error(`Invalid ${name} value '${value}'`)
+	}
 	const parsed = parseFloat(trimmed)
-	return Number.isFinite(parsed) ? parsed : 0
+	if (!Number.isFinite(parsed)) {
+		throw new Error(`${name} value '${value}' is out of range`)
+	}
+	return parsed
 }

@@ -28,6 +28,10 @@ export class MapEditor implements EditorPanel {
 
 	onUpdate(file: NbtFile, edit: NbtEdit) {
 		this.onInit(file)
+		const ctx = this.root.querySelector<HTMLCanvasElement>('canvas.nbt-map')?.getContext('2d')
+		if (ctx) {
+			this.paint(ctx)
+		}
 	}
 
 	private paint(ctx: CanvasRenderingContext2D) {

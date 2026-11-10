@@ -1,4 +1,4 @@
-import type { NbtCompound, NbtList } from 'deepslate'
+import type { JsonValue, NbtCompound, NbtList } from 'deepslate'
 import { NbtFile, NbtTag, NbtType } from 'deepslate'
 import { NbtPath } from '../common/NbtPath'
 import type { SearchQuery } from '../common/Operations'
@@ -19,9 +19,7 @@ export type EditingTag = Omit<SelectedTag, 'path'> & { path: NbtPath | null }
 
 type PathToElements = {
 	element?: Element,
-	childs?: {
-		[key in string | number]: PathToElements
-	},
+	childs?: Map<string | number, PathToElements>,
 }
 
 export class TreeEditor implements EditorPanel {
@@ -43,7 +41,7 @@ export class TreeEditor implements EditorPanel {
 		this.content.className = 'nbt-content'
 		this.file = NbtFile.create()
 		this.prefix = new NbtPath()
-		this.pathToElement = {childs: {}}
+		this.pathToElement = {}
 		this.highlighted = null
 		this.selected = null
 		this.editing = null
@@ -91,7 +89,7 @@ export class TreeEditor implements EditorPanel {
 		return searchResults.map(path => ({
 			path,
 			show: () => this.showPath(path),
-			replace: (query) => replaceNode(this.file.root, path, query),
+			replace: (query, claimed) => replaceNode(this.file.root, path, query, claimed),
 		}))
 	}
 
@@ -100,7 +98,7 @@ export class TreeEditor implements EditorPanel {
 			return
 		}
 		const redrawStart = path.pop().subPaths()
-			.find(p => !this.expanded.has(p.toString()))
+			.find(p => !this.expanded.has(TreeEditor.key(p)))
 		const prevHighlight = this.highlighted
 		this.highlighted = path
 		if (redrawStart) {
@@ -173,25 +171,28 @@ export class TreeEditor implements EditorPanel {
 	}
 
 	protected redraw() {
-		this.pathToElement = { childs: {} }
+		this.pathToElement = {}
 		const root = this.drawTag(this.prefix, this.file.root)
 		this.content.innerHTML = ''
 		this.content.append(root)
 	}
 
+	// JSON keeps string and number segments apart, so 'a.b' and a -> b cannot collide
+	private static key(path: NbtPath) {
+		return JSON.stringify(path.arr)
+	}
+
 	protected isExpanded(path: NbtPath) {
-		const p = path.toString()
-		return this.expanded.has(p) || this.highlighted?.pop().startsWith(path)
+		return this.expanded.has(TreeEditor.key(path)) || this.highlighted?.pop().startsWith(path)
 	}
 
 	protected collapse(path: NbtPath) {
-		const p = path.toString()
-		this.expanded.delete(p)
+		this.expanded.delete(TreeEditor.key(path))
 	}
 
 	protected expand(path: NbtPath) {
 		path.subPaths().forEach(p => {
-			this.expanded.add(p.toString())
+			this.expanded.add(TreeEditor.key(p))
 		})
 	}
 
@@ -203,6 +204,7 @@ export class TreeEditor implements EditorPanel {
 		if (selected) {
 			this.expand(selected.path.pop())
 			this.root.querySelectorAll('.nbt-tag.highlighted').forEach(e => e.classList.remove('highlighted'))
+			this.highlighted = null
 			selected.el.classList.add('selected')
 		}
 
@@ -220,9 +222,13 @@ export class TreeEditor implements EditorPanel {
 	protected setPathElement(path: NbtPath, el: Element) {
 		let node = this.pathToElement
 		for (const e of path.arr) {
-			if (!node.childs) node.childs = {}
-			if (!node.childs[e]) node.childs[e] = {}
-			node = node.childs[e]
+			if (!node.childs) node.childs = new Map()
+			let child = node.childs.get(e)
+			if (!child) {
+				child = {}
+				node.childs.set(e, child)
+			}
+			node = child
 		}
 		node.element = el
 	}
@@ -230,8 +236,9 @@ export class TreeEditor implements EditorPanel {
 	protected getPathElement(path: NbtPath) {
 		let node = this.pathToElement
 		for (const e of path.arr) {
-			if (!node.childs || !node.childs[e]) return undefined
-			node = node.childs[e]
+			const child = node.childs?.get(e)
+			if (!child) return undefined
+			node = child
 		}
 		return node.element
 	}
@@ -396,7 +403,7 @@ export class TreeEditor implements EditorPanel {
 	}
 
 	protected clickExpandableTag(path: NbtPath, tag: NbtTag, el: Element) {
-		if (this.expanded.has(path.toString())) {
+		if (this.expanded.has(TreeEditor.key(path))) {
 			this.collapse(path)
 			this.closeBody(path, el)
 		} else {
@@ -424,10 +431,14 @@ export class TreeEditor implements EditorPanel {
 		el.querySelector('span.nbt-value')?.remove()
 		const value = serializePrimitive(tag)
 
-		const valueEl = document.createElement('input')
+		const multiline = tag.isString()
+		const valueEl = document.createElement(multiline ? 'textarea' : 'input')
 		el.append(valueEl)
 		valueEl.classList.add('nbt-value')
 		valueEl.value = value
+		if (valueEl instanceof HTMLTextAreaElement) {
+			valueEl.rows = Math.min(10, value.split('\n').length)
+		}
 		valueEl.focus()
 		valueEl.setSelectionRange(value.length, value.length)
 		valueEl.scrollLeft = valueEl.scrollWidth
@@ -437,19 +448,31 @@ export class TreeEditor implements EditorPanel {
 		confirmButton.classList.add('nbt-confirm')
 		confirmButton.textContent = locale('confirm')
 		const makeEdit = () => {
-			const newTag = parsePrimitive(tag.getId(), valueEl.value).toJsonWithId()
+			let newTag: JsonValue
+			try {
+				newTag = parsePrimitive(tag.getId(), valueEl.value).toJsonWithId()
+			} catch (e) {
+				this.showError(e)
+				return
+			}
 			const oldTag = tag.toJsonWithId()
 			if (JSON.stringify(encodeSpecialNumbers(oldTag)) !== JSON.stringify(encodeSpecialNumbers(newTag))) {
 				this.editHandler({ type: 'set', path: path.arr, old: oldTag, new: newTag })
 			}
 		}
 		confirmButton.addEventListener('click', makeEdit)
-		valueEl.addEventListener('keyup', evt => {
-			if (evt.key === 'Enter') {
+		valueEl.addEventListener('keydown', (evt: KeyboardEvent) => {
+			// Shift+Enter inserts a newline in multi-line strings
+			if (evt.key === 'Enter' && !evt.isComposing && !(multiline && evt.shiftKey)) {
+				evt.preventDefault()
 				makeEdit()
 			}
 		})
 		this.setEditing(path, tag, el)
+	}
+
+	protected showError(e: unknown) {
+		this.vscode.postMessage({ type: 'error', body: e instanceof Error ? e.message : String(e) })
 	}
 
 	protected removeTag(path: NbtPath, tag: NbtTag, el: Element) {
@@ -538,11 +561,18 @@ export class TreeEditor implements EditorPanel {
 				? NbtType[typeSelect.value] as number
 				: (tag.isListOrArray() ? tag.getType() : NbtType.End)
 			const last = tag.isCompound() ? keyInput.value : 0
+			if (tag.isCompound() && tag.has(last as string)) {
+				this.showError(new Error(`'${last}' already exists`))
+				return
+			}
 			let newTag = NbtTag.create(valueType)
 			if (!this.canExpand(valueType)) {
 				try {
 					newTag = parsePrimitive(valueType, valueInput.value)
-				} catch(e) {}
+				} catch (e) {
+					this.showError(e)
+					return
+				}
 			}
 
 			const edit: NbtEdit = { type: 'add', path: path.push(last).arr, value: newTag.toJsonWithId() }
@@ -560,7 +590,8 @@ export class TreeEditor implements EditorPanel {
 	}
 
 	protected renameTag(path: NbtPath, tag: NbtTag, el: Element) {
-		if (this.readOnly) return
+		// Only compound children have a name; list elements and the root cannot be renamed
+		if (this.readOnly || typeof path.last() !== 'string') return
 
 		el.querySelector('span.nbt-key')?.remove()
 		const valueEl = el.querySelector('.nbt-value, .nbt-entries')
@@ -581,6 +612,11 @@ export class TreeEditor implements EditorPanel {
 		const makeEdit = () => {
 			const newKey = keyEl.value
 			if (key !== newKey) {
+				const parent = getNode(this.file.root, path.pop())
+				if (parent.isCompound() && parent.has(newKey)) {
+					this.showError(new Error(`'${newKey}' already exists`))
+					return
+				}
 				this.editHandler({ type: 'move', source: path.arr, path: path.pop().push(newKey).arr })
 			}
 			this.clearEditing()

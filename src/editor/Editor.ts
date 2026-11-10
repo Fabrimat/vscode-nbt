@@ -38,7 +38,7 @@ function lazy<T>(getter: () => T) {
 export type SearchResult = {
 	path: NbtPath,
 	show(): void,
-	replace(replacement: SearchQuery): NbtEdit,
+	replace(replacement: SearchQuery, claimed?: Set<string>): NbtEdit | null,
 }
 
 export interface EditorPanel {
@@ -187,7 +187,7 @@ class Editor {
 		})
 
 		document.addEventListener('keydown', evt => {
-			if (evt.ctrlKey && (evt.code === 'KeyF' || evt.code === 'KeyH')) {
+			if ((evt.ctrlKey || evt.metaKey) && (evt.code === 'KeyF' || evt.code === 'KeyH')) {
 				this.findWidget.classList.add('visible')
 				if (this.searchQuery.name) {
 					findNameInput.focus()
@@ -253,10 +253,11 @@ class Editor {
 
 			case 'response':
 				const callback = this.messageCallbacks.get(m.requestId ?? 0)
-				if (m.body) {
+				this.messageCallbacks.delete(m.requestId ?? 0)
+				if (m.error === undefined) {
 					callback?.res(m.body)
 				} else {
-					callback?.rej(m.error ?? 'Unknown response')
+					callback?.rej(m.error)
 				}
 				return
 
@@ -418,7 +419,6 @@ class Editor {
 			return
 		}
 		document.querySelector('.region-menu')?.classList.remove('invalid')
-		this.setPanel(this.activePanel)
 		this.inMap = false
 		this.updateRegionMap()
 		this.setPanel(this.activePanel)
@@ -443,8 +443,8 @@ class Editor {
 		}
 		if (this.lastReplace && this.searchResults?.[this.searchIndex]?.path?.equals(this.lastReplace)) {
 			this.searchIndex += 1
-			this.lastReplace = null
 		}
+		this.lastReplace = null
 		this.showMatch(this.searchIndex)
 	}
 
@@ -453,8 +453,15 @@ class Editor {
 		const query = this.getQuery(this.findWidget.querySelector('.replace-part'))
 		if (query.name || query.value || query.type) {
 			const result = this.searchResults[this.searchIndex]
-			this.lastReplace = result.path
-			this.makeEdit(result.replace(query))
+			try {
+				const edit = result.replace(query)
+				if (edit) {
+					this.lastReplace = result.path
+					this.makeEdit(edit)
+				}
+			} catch (e) {
+				vscode.postMessage({ type: 'error', body: e.message })
+			}
 		}
 		console.log('Done replace!')
 	}
@@ -463,8 +470,24 @@ class Editor {
 		if (!this.searchResults?.length) return
 		const query = this.getQuery(this.findWidget.querySelector('.replace-part'))
 		if (query.name || query.value || query.type) {
-			const edits = this.searchResults.map(r => r.replace(query))
-			this.makeEdit({ type: 'composite', edits })
+			// Nodes that cannot be replaced (wrong type, name collision) are skipped
+			const claimed = new Set<string>()
+			const edits: NbtEdit[] = []
+			let skipped = 0
+			for (const result of this.searchResults) {
+				try {
+					const edit = result.replace(query, claimed)
+					if (edit) edits.push(edit)
+				} catch (e) {
+					skipped += 1
+				}
+			}
+			if (skipped > 0) {
+				vscode.postMessage({ type: 'error', body: `Skipped ${skipped} match${skipped === 1 ? '' : 'es'} that could not be replaced` })
+			}
+			if (edits.length > 0) {
+				this.makeEdit({ type: 'composite', edits })
+			}
 		}
 	}
 
