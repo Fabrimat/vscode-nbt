@@ -2,7 +2,7 @@
 
 ## 1.0.0
 
-First release as VSCode NBT Plus, a maintained continuation of misode's NBT Viewer. Includes all upstream changes up to 0.9.7.
+First release as NBT Plus for VS Code, a maintained continuation of misode's NBT Viewer. Includes all upstream changes up to 0.9.7.
 
 ### Added
 * 3D structure view for Bedrock `.mcstructure` files, including the water layer

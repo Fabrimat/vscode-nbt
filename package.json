@@ -1,6 +1,6 @@
 {
 	"name": "vscode-nbt-plus",
-	"displayName": "VSCode NBT Plus",
+	"displayName": "NBT Plus for VS Code",
 	"description": "View and edit Minecraft NBT (Java & Bedrock) with a 3D structure viewer for .nbt, .mcstructure, .litematic, .schem and .schematic files, plus region (.mca) support",
 	"version": "1.0.0",
 	"publisher": "Fabrimat",

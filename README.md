@@ -1,4 +1,4 @@
-# VSCode NBT Plus
+# NBT Plus for VS Code
 View and edit Minecraft NBT files in VS Code, with a 3D block view for structures.
 
 ![](https://user-images.githubusercontent.com/17352009/104337363-b4aeb000-54f5-11eb-93a2-47ce2e3e4fea.png)
