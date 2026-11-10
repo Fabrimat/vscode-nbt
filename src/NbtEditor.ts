@@ -65,6 +65,7 @@ export class NbtEditorProvider implements vscode.CustomEditorProvider<NbtDocumen
 		webviewPanel: vscode.WebviewPanel,
 		_token: vscode.CancellationToken
 	): Promise<void> {
+		const start = Date.now()
 		this.webviews.add(document.uri, webviewPanel)
 
 		webviewPanel.webview.options = {
@@ -85,6 +86,7 @@ export class NbtEditorProvider implements vscode.CustomEditorProvider<NbtDocumen
 		let version = ''
 
 		if (isStructure || isRegion) {
+			webviewPanel.webview.html = '<!DOCTYPE html><html lang="en"><body><p>Loading Minecraft assets...</p></body></html>'
 			try {
 				const assets = await getAssets(document.dataVersion, this.logger)
 				version = assets.version
@@ -102,6 +104,7 @@ export class NbtEditorProvider implements vscode.CustomEditorProvider<NbtDocumen
 		}
 
 		webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview, version, isStructure, isRegion)
+		this.logger.info(`Resolved editor in ${Date.now() - start}ms`)
 
 		webviewPanel.webview.onDidReceiveMessage(e => this.onMessage(e, document, webviewPanel))
 	}

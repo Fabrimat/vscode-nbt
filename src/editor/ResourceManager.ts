@@ -6,6 +6,7 @@ export class ResourceManager implements BlockDefinitionProvider, BlockModelProvi
 	private blockDefinitions: { [id: string]: BlockDefinition }
 	private blockModels: { [id: string]: BlockModel }
 	private textureAtlas: TextureAtlas
+	private readonly flattened = new Set<string>()
 	private readonly blocks: Map<string, {
 		default: Record<string, string>,
 		properties: Record<string, string[]>,
@@ -29,8 +30,15 @@ export class ResourceManager implements BlockDefinitionProvider, BlockModelProvi
 		return this.blockDefinitions[id.toString()]
 	}
 
+	// models are flattened lazily, only the ones a structure actually uses
 	public getBlockModel(id: Identifier) {
-		return this.blockModels[id.toString()]
+		const key = id.toString()
+		const model = this.blockModels[key]
+		if (model && !this.flattened.has(key)) {
+			this.flattened.add(key)
+			model.flatten(this)
+		}
+		return model
 	}
 
 	public getTextureUV(id: Identifier) {
@@ -72,7 +80,6 @@ export class ResourceManager implements BlockDefinitionProvider, BlockModelProvi
 		Object.keys(models).forEach(id => {
 			this.blockModels[Identifier.create(id).toString()] = BlockModel.fromJson(models[id])
 		})
-		Object.values(this.blockModels).forEach(m => m.flatten(this))
 	}
 
 	public loadBlockAtlas(image: HTMLImageElement, textures: any) {
