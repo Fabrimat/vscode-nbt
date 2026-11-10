@@ -1,5 +1,7 @@
 const LOCALES = {
 	copy: 'Copy',
+	'snbt.tooLarge': 'This SNBT is too large to show here (%0 lines).',
+	'snbt.openInEditor': 'Open in Text Editor',
 	name: 'Name',
 	value: 'Value',
 	confirm: 'Confirm',

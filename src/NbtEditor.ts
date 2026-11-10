@@ -284,6 +284,11 @@ export class NbtEditorProvider implements vscode.CustomEditorProvider<NbtDocumen
 				})
 				return
 
+			case 'openSnbt':
+				vscode.workspace.openTextDocument({ content: message.body })
+					.then(doc => vscode.window.showTextDocument(doc))
+				return
+
 			case 'error':
 				this.logger.error(message.body)
 				vscode.window.showErrorMessage(`Error in webview: ${message.body}`)

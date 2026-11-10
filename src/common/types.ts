@@ -43,6 +43,9 @@ export type EditorMessage = { requestId?: number } & ({
 	type: 'edit',
 	body: NbtEdit,
 } | {
+	type: 'openSnbt',
+	body: string,
+} | {
 	type: 'getChunkData',
 	body: {
 		x: number,
