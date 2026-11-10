@@ -1,7 +1,7 @@
 import envPaths from 'env-paths'
 import path from 'path'
-import { Readable, Writable } from 'stream'
-import tar from 'tar'
+import { Writable } from 'stream'
+import { Parser } from 'tar'
 import type { Logger } from './common/types'
 import type { Job } from './Downloader'
 import { Downloader } from './Downloader'
@@ -27,25 +27,53 @@ interface McmetaVersion {
 	sha1: string
 }
 
-export async function getAssets(dataVersion: number | undefined, logger: Logger) {
+const assetsMemo = new Map<string, Promise<{ version: string }>>()
+let versionsRefresh: Promise<McmetaVersion[] | undefined> | undefined
+
+/**
+ * Resolves to the assets of the version matching `dataVersion`, downloading what is not cached yet.
+ * Results are memoized for the session, so reopening files does no disk or network work.
+ */
+export function getAssets(dataVersion: number | undefined, logger: Logger) {
+	const key = String(dataVersion)
+	let promise = assetsMemo.get(key)
+	if (!promise) {
+		promise = loadAssets(dataVersion, logger)
+		assetsMemo.set(key, promise)
+		promise.catch(() => assetsMemo.delete(key))
+	}
+	return promise
+}
+
+async function loadAssets(dataVersion: number | undefined, logger: Logger) {
 	const downloader = new Downloader(mcmetaRoot, logger)
 
-	const versions = await downloader.download<McmetaVersion[]>({
+	const downloadVersions = (refresh: boolean) => downloader.download<McmetaVersion[]>({
 		id: 'versions',
 		uri: `${MCMETA}/summary/versions/data.min.json`,
 		transformer: data => JSON.parse(data.toString('utf-8')),
-		cache: cacheOptions(),
+		cache: cacheOptions(undefined, refresh),
 	})
+	// A cached list is used right away; it is refreshed in the background once per session.
+	let versions = await downloadVersions(false)
+	versionsRefresh ??= downloadVersions(true)
+	if (dataVersion !== undefined && !versions?.some(v => v.data_version === dataVersion)) {
+		// Unknown to the cached list (e.g. a new snapshot), so wait for the refresh.
+		versions = await versionsRefresh ?? versions
+	}
 	const target = dataVersion ?? versions?.find(v => v.type === 'release')?.data_version
 	const version = versions?.find(v => v.data_version === target)?.id ?? FALLBACK_VERSION
+	if (!/^[\w.\-]+$/.test(version)) {
+		throw new Error(`Invalid version id: ${version}`)
+	}
 	logger.info(`Found matching version for ${target}: ${version}`)
 
-	const [blocks, atlas, uvmapping] = await Promise.all([
+	const [blocks, atlas, uvmapping, assets] = await Promise.all([
 		downloader.download({
 			id: `${version}-blocks`,
 			uri: `${MCMETA}/${version}-summary/blocks/data.min.json`,
 			transformer: () => true,
-			cache: cacheOptions(data => Buffer.from('const stringifiedBlocks = `' + data.toString('utf-8') + '`')),
+			cache: cacheOptions(data => stringifiedScript('stringifiedBlocks', data.toString('utf-8'))),
 		}),
 		downloader.download({
 			id: `${version}-atlas`,
@@ -57,7 +85,7 @@ export async function getAssets(dataVersion: number | undefined, logger: Logger)
 			id: `${version}-uvmapping`,
 			uri: `${MCMETA}/${version}-atlas/all/data.min.json`,
 			transformer: () => true,
-			cache: cacheOptions(data => Buffer.from('const stringifiedUvmapping = `' + data.toString('utf-8') + '`')),
+			cache: cacheOptions(data => stringifiedScript('stringifiedUvmapping', data.toString('utf-8'))),
 		}),
 		downloader.download({
 			id: `${version}-assets`,
@@ -77,12 +105,12 @@ export async function getAssets(dataVersion: number | undefined, logger: Logger)
 				}
 				const blockstates = filterEntries('blockstates')
 				const models = filterEntries('models')
-				return Buffer.from('const stringifiedAssets = `' + JSON.stringify({ blockstates, models }) + '`')
+				return stringifiedScript('stringifiedAssets', JSON.stringify({ blockstates, models }))
 			}),
 		}),
 	])
 
-	if (!blocks || !atlas || !uvmapping) {
+	if (!blocks || !atlas || !uvmapping || !assets) {
 		throw new Error('Failed loading assets')
 	}
 
@@ -91,15 +119,19 @@ export async function getAssets(dataVersion: number | undefined, logger: Logger)
 	}
 }
 
-function cacheOptions(serializer?: (data: Buffer) => Buffer | Promise<Buffer>): Job<unknown>['cache'] {
-	return {
-		checksumExtension: '.cache',
-		checksumJob: {
-			uri: `${MCMETA}/summary/version.json`,
-			transformer: data => JSON.parse(data.toString('utf-8')).id,
-		},
-		serializer,
-	}
+function cacheOptions(serializer?: (data: Buffer) => Buffer | Promise<Buffer>, refresh = false): Job<unknown>['cache'] {
+	// Every id is version-specific (or, for the versions list, refreshed explicitly),
+	// so a cached file is used as is without a network round-trip.
+	return { serializer, refresh }
+}
+
+/**
+ * Emits a script defining `name` as a string holding the JSON `text`, which the webview JSON.parses.
+ * @throws If `text` is not valid JSON.
+ */
+function stringifiedScript(name: string, text: string) {
+	JSON.parse(text)
+	return Buffer.from(`const ${name} = ${JSON.stringify(text)}`)
 }
 
 interface TarEntry {
@@ -109,28 +141,35 @@ interface TarEntry {
 
 function readTarGz(buffer: Buffer, filter: (path: string) => boolean = (() => true)) {
 	const entries: TarEntry[] = []
+	const pending: Promise<void>[] = []
 	return new Promise<TarEntry[]>((res, rej) => {
-		Readable.from(buffer)
+		const parser = new Parser()
+		parser
 			.on('error', err => rej(err))
-			.pipe(new tar.Parse())
 			.on('entry', entry => {
 				if (filter(entry.path)) {
-					let data = ''
-					entry.pipe(new Writable({
-						write(chunk, _, next) {
-							data += chunk.toString()
-							next()
-						},
-						final() {
-							entries.push({ path: entry.path, data })
-						},
+					const chunks: Buffer[] = []
+					pending.push(new Promise<void>((done, fail) => {
+						entry.on('error', fail)
+						entry.pipe(new Writable({
+							write(chunk, _, next) {
+								chunks.push(chunk)
+								next()
+							},
+							final(callback) {
+								entries.push({ path: entry.path, data: Buffer.concat(chunks).toString('utf-8') })
+								callback()
+								done()
+							},
+						}))
 					}))
 				} else {
 					entry.resume()
 				}
 			})
 			.on('end', () => {
-				res(entries)
+				Promise.all(pending).then(() => res(entries), rej)
 			})
+		parser.end(buffer)
 	})
 }

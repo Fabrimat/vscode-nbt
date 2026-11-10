@@ -8,7 +8,7 @@ import { promises as fsp } from 'fs'
 import type { IncomingMessage } from 'http'
 import path from 'path'
 import type { Logger } from './common/types'
-import { bufferToString, fileUtil, isEnoent, promisifyAsyncIterable } from './fileUtil'
+import { fileUtil, isEnoent, promisifyAsyncIterable } from './fileUtil'
 
 type RemoteProtocol = 'http:' | 'https:'
 export type RemoteUriString = `${RemoteProtocol}${string}`
@@ -20,7 +20,25 @@ export namespace RemoteUriString {
 
 export interface DownloaderDownloadOut {
 	cachePath?: string,
-	checksum?: string,
+}
+
+/**
+ * In-flight cached downloads, so documents opened at the same time share one download.
+ */
+const inFlight = new Map<string, Promise<unknown>>()
+
+/**
+ * Writes to a temp file and renames it, so a crash never leaves a truncated file behind.
+ */
+async function writeFileAtomic(filePath: string, data: Buffer | string) {
+	const tmp = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
+	try {
+		await fileUtil.writeFile(fileUtil.pathToFileUri(tmp), data)
+		await fsp.rename(tmp, filePath)
+	} catch (e) {
+		await fsp.unlink(tmp).catch(() => { })
+		throw e
+	}
 }
 
 export class Downloader {
@@ -30,66 +48,44 @@ export class Downloader {
 		private readonly lld = LowLevelDownloader.create(),
 	) { }
 
-	async download<R>(job: Job<R>, out: DownloaderDownloadOut = {}): Promise<R | undefined> {
+	download<R>(job: Job<R>, out: DownloaderDownloadOut = {}): Promise<R | undefined> {
+		if (!job.cache) {
+			return this.doDownload(job, out)
+		}
+		const key = path.join(this.cacheRoot, job.id)
+		let promise = inFlight.get(key) as Promise<R | undefined> | undefined
+		if (!promise) {
+			promise = this.doDownload(job, out).finally(() => inFlight.delete(key))
+			inFlight.set(key, promise)
+		}
+		return promise
+	}
+
+	private async doDownload<R>(job: Job<R>, out: DownloaderDownloadOut): Promise<R | undefined> {
 		const { id, cache, uri, options, transformer } = job
-		let checksum: string | undefined
 		let cachePath: string | undefined
-		let cacheChecksumPath: string | undefined
 		if (cache) {
-			const { checksumJob, checksumExtension } = cache
 			out.cachePath = cachePath = path.join(this.cacheRoot, id)
-			cacheChecksumPath = path.join(this.cacheRoot, id + checksumExtension)
-			try {
-				out.checksum = checksum = await this.download({ ...checksumJob, id: id + checksumExtension })
+			if (!cache.refresh) {
+				// The id is specific to a version, so a cached file never goes stale and needs no network round-trip.
 				try {
-					const cacheChecksum = bufferToString(await fileUtil.readFile(fileUtil.pathToFileUri(cacheChecksumPath)))
-						.slice(0, -1) // Remove ending newline
-					if (checksum === cacheChecksum) {
-						try {
-							const cachedBuffer = await fileUtil.readFile(fileUtil.pathToFileUri(cachePath))
-							const deserializer = cache.deserializer ?? (b => b)
-							const ans = await transformer(await deserializer(cachedBuffer))
-							this.logger.info(`[Downloader] [${id}] Skipped downloading thanks to cache ${cacheChecksum}`)
-							return ans
-						} catch (e) {
-							this.logger.error(`[Downloader] [${id}] Loading cached file “${cachePath}”`, e)
-							if (isEnoent(e)) {
-								// Cache checksum exists, but cached file doesn't.
-								// Remove the invalid cache checksum.
-								try {
-									await fsp.unlink(cacheChecksumPath)
-								} catch (e) {
-									this.logger.error(`[Downloader] [${id}] Removing invalid cache checksum “${cacheChecksumPath}”`, e)
-								}
-							}
-						}
-					}
+					const cachedBuffer = await fileUtil.readFile(fileUtil.pathToFileUri(cachePath))
+					const deserializer = cache.deserializer ?? (b => b)
+					return await transformer(await deserializer(cachedBuffer))
 				} catch (e) {
 					if (!isEnoent(e)) {
-						this.logger.error(`[Downloader] [${id}] Loading cache checksum “${cacheChecksumPath}”`, e)
+						this.logger.error(`[Downloader] [${id}] Loading cached file “${cachePath}”`, e)
 					}
 				}
-			} catch (e) {
-				this.logger.error(`[Downloader] [${id}] Fetching latest checksum “${checksumJob.uri}”`, e)
 			}
 		}
 
 		try {
 			const buffer = await this.lld.get(uri, options)
-			if (cache && cachePath && cacheChecksumPath) {
-				if (checksum) {
-					try {
-						await fileUtil.writeFile(fileUtil.pathToFileUri(cacheChecksumPath), `${checksum}\n`)
-					} catch (e) {
-						this.logger.error(`[Downloader] [${id}] Saving cache checksum “${cacheChecksumPath}”`, e)
-					}
-				}
-				try {
-					const serializer = cache.serializer ?? (b => b)
-					await fileUtil.writeFile(fileUtil.pathToFileUri(cachePath), await serializer(buffer))
-				} catch (e) {
-					this.logger.error(`[Downloader] [${id}] Caching file “${cachePath}”`, e)
-				}
+			if (cache && cachePath) {
+				// The webview loads these files directly, so a failed serialization or write is a failed download.
+				const serializer = cache.serializer ?? (b => b)
+				await writeFileAtomic(cachePath, await serializer(buffer))
 			}
 			this.logger.info(`[Downloader] [${id}] Downloaded from “${uri}”`)
 			return await transformer(buffer)
@@ -122,10 +118,9 @@ export interface Job<R> {
 	uri: RemoteUriString,
 	cache?: {
 		/**
-		 * A download {@link Job} that will return a checksum of the latest remote data.
+		 * Skip the cached file and download, still writing the result to the cache.
 		 */
-		checksumJob: Omit<Job<string>, 'cache' | 'id'>,
-		checksumExtension: `.${string}`,
+		refresh?: boolean,
 		serializer?: (data: Buffer) => Buffer | Promise<Buffer>,
 		deserializer?: (cache: Buffer) => Buffer | Promise<Buffer>,
 	},
@@ -160,19 +155,22 @@ export namespace LowLevelDownloader {
 class LowLevelDownloaderImpl implements LowLevelDownloader {
 	get(uri: RemoteUriString, options: LowLevelDownloadOptions = {}): Promise<Buffer> {
 		const protocol = RemoteUriString.getProtocol(uri)
+		const { timeout = 15_000, ...requestOptions } = options
 		return new Promise((resolve, reject) => {
 			const callback = (res: IncomingMessage) => {
 				if (res.statusCode !== 200) {
+					res.resume()
 					reject(new Error(`Status code ${res.statusCode}: ${res.statusMessage}`))
 				} else {
 					resolve(promisifyAsyncIterable(res, chunks => Buffer.concat(chunks)))
 				}
 			}
-			if (protocol === 'http:') {
-				http.get(uri, options, callback)
-			} else {
-				https.get(uri, options, callback)
-			}
+			const req = protocol === 'http:'
+				? http.get(uri, requestOptions, callback)
+				: https.get(uri, requestOptions, callback)
+			req.on('error', reject)
+			// Idle-socket timeout, which also covers a body that stalls midway.
+			req.setTimeout(timeout, () => req.destroy(new Error(`Timed out after ${timeout} ms: ${uri}`)))
 		})
 	}
 }
@@ -202,7 +200,4 @@ class LowLevelDownloaderMock implements LowLevelDownloader {
 			return Buffer.from(JSON.stringify(fixture), 'utf-8')
 		}
 	}
-}
-function pathToFileUri(pathToFileUri: any) {
-	throw new Error('Function not implemented.')
 }
