@@ -12,5 +12,5 @@ export function activate(context: vscode.ExtensionContext) {
 		warn: (msg: any, ...args: any[]): void => output.appendLine(util.format(msg, ...args)),
 	}
 
-	context.subscriptions.push(NbtEditorProvider.register(context, logger))
+	context.subscriptions.push(output, NbtEditorProvider.register(context, logger))
 }

@@ -1,4 +1,5 @@
 import { NbtRegion } from 'deepslate'
+import * as crypto from 'crypto'
 import * as path from 'path'
 import * as vscode from 'vscode'
 import { decodeSpecialNumbers, encodeSpecialNumbers } from './common/specialNumbers'
@@ -44,6 +45,12 @@ export class NbtEditorProvider implements vscode.CustomEditorProvider<NbtDocumen
 			this._onDidChangeCustomDocument.fire({ document, ...e })
 		}))
 
+		listeners.push(document.onDidReset(() => {
+			for (const panel of this.webviews.get(document.uri)) {
+				this.sendInit(panel, document)
+			}
+		}))
+
 		listeners.push(document.onDidChangeContent(e => {
 			this.broadcastMessage(document, { type: 'update', body: e })
 		}))
@@ -64,17 +71,34 @@ export class NbtEditorProvider implements vscode.CustomEditorProvider<NbtDocumen
 			enableScripts: true,
 			localResourceRoots: [
 				vscode.Uri.file(mcmetaRoot),
-				vscode.Uri.file(this._context.extensionPath),
+				vscode.Uri.file(path.join(this._context.extensionPath, 'out')),
+				vscode.Uri.file(path.join(this._context.extensionPath, 'res')),
+				vscode.Uri.file(path.join(this._context.extensionPath, 'node_modules', 'vscode-codicons', 'dist')),
 			],
 		}
+
+		let disposed = false
+		webviewPanel.onDidDispose(() => { disposed = true })
 
 		const isStructure = document.isStructure
 		const isRegion = document.documentData instanceof NbtRegion
 		let version = ''
 
 		if (isStructure || isRegion) {
-			const assets = await getAssets(document.dataVersion, this.logger)
-			version = assets.version
+			try {
+				const assets = await getAssets(document.dataVersion, this.logger)
+				version = assets.version
+			} catch (e) {
+				this.logger.error(e)
+				if (!disposed) {
+					const message = String(e?.message ?? e).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+					webviewPanel.webview.html = `<!DOCTYPE html><html lang="en"><body><p>Failed to load Minecraft assets: ${message}</p></body></html>`
+				}
+				return
+			}
+		}
+		if (disposed) {
+			return
 		}
 
 		webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview, version, isStructure, isRegion)
@@ -104,12 +128,7 @@ export class NbtEditorProvider implements vscode.CustomEditorProvider<NbtDocumen
 	//#endregion
 
 	private getNonce() {
-		let text = ''
-		const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-		for (let i = 0; i < 32; i++) {
-			text += possible.charAt(Math.floor(Math.random() * possible.length))
-		}
-		return text
+		return crypto.randomBytes(16).toString('base64')
 	}
 
 	private getHtmlForWebview(webview: vscode.Webview, version: string, isStructure: boolean, isRegion: boolean): string {
@@ -217,48 +236,49 @@ export class NbtEditorProvider implements vscode.CustomEditorProvider<NbtDocumen
 		}
 	}
 
+	private sendInit(panel: vscode.WebviewPanel, document: NbtDocument): void {
+		this.postMessage(panel, {
+			type: 'init',
+			body: {
+				type: document.documentData instanceof NbtRegion ? 'region' :
+					document.isStructure ? 'structure' : document.isMap ? 'map' : 'default',
+				readOnly: document.isReadOnly,
+				content: document.documentData.toJson(),
+			},
+		})
+	}
+
 	private onMessage(message: EditorMessage, document: NbtDocument, panel: vscode.WebviewPanel) {
 		message = decodeSpecialNumbers(message)
 		switch (message.type) {
 			case 'ready':
-				this.postMessage(panel, {
-					type: 'init',
-					body: {
-						type: document.documentData instanceof NbtRegion ? 'region' :
-							document.isStructure ? 'structure' : document.isMap ? 'map' : 'default',
-						readOnly: document.isReadOnly,
-						content: document.documentData.toJson(),
-					},
-				})
+				this.sendInit(panel, document)
 				return
 
 			case 'edit':
 				try {
 					document.makeEdit(message.body)
 				} catch (e) {
+					// the webview only applies edits echoed back as updates, so nothing to resync
 					vscode.window.showErrorMessage(`Failed to apply edit: ${e.message}`)
 				}
 				return
 
 			case 'getChunkData':
-				(async () => {
-					try {
-						document.getChunkData(message.body.x, message.body.z).then(chunk => {
-							this.postMessage(panel, {
-								type: 'response',
-								requestId: message.requestId,
-								body: chunk.getFile().toJson(),
-							})
-						})
-					} catch (e) {
-						vscode.window.showErrorMessage(`Failed to load chunk: ${e.message}`)
-						this.postMessage(panel, {
-							type: 'response',
-							requestId: message.requestId,
-							error: e.message,
-						})
-					}
-				})()
+				document.getChunkData(message.body.x, message.body.z).then(chunk => {
+					this.postMessage(panel, {
+						type: 'response',
+						requestId: message.requestId,
+						body: chunk.getFile().toJson(),
+					})
+				}).catch(e => {
+					vscode.window.showErrorMessage(`Failed to load chunk: ${e.message}`)
+					this.postMessage(panel, {
+						type: 'response',
+						requestId: message.requestId,
+						error: e.message,
+					})
+				})
 				return
 
 			case 'error':

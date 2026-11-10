@@ -218,13 +218,14 @@ class Editor {
 		m = decodeSpecialNumbers(m)
 		switch (m.type) {
 			case 'init':
-				console.log(m.body)
 				this.type = m.body.type
 				this.nbtFile = m.body.type === 'region'
 					? NbtRegion.fromJson(m.body.content, (x, z) => this.getChunkData(x, z))
 					: NbtFile.fromJson(m.body.content)
-				console.log(this.nbtFile)
 				this.readOnly = m.body.readOnly
+				// a repeated init (after revert or resync) must rebuild every panel
+				Object.values(this.panels).forEach(p => p.updated = false)
+				this.selectedChunk = { x: -1, z: -1 }
 				if (this.nbtFile instanceof NbtRegion.Ref) {
 					this.type = 'chunk'
 					this.activePanel = 'default'
@@ -463,7 +464,6 @@ class Editor {
 				vscode.postMessage({ type: 'error', body: e.message })
 			}
 		}
-		console.log('Done replace!')
 	}
 
 	private doReplaceAll() {
@@ -522,7 +522,6 @@ class Editor {
 		if (this.nbtFile instanceof NbtRegion.Ref) {
 			edit = { type: 'chunk', ...this.selectedChunk, edit }
 		}
-		console.warn('Edit', edit)
 		vscode.postMessage(encodeSpecialNumbers({ type: 'edit', body: edit }))
 	}
 }

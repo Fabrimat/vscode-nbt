@@ -38,11 +38,12 @@ export class NbtDocument extends Disposable implements vscode.CustomDocument {
 	): Promise<NbtDocument | PromiseLike<NbtDocument>> {
 		const dataFile = typeof backupId === 'string' ? vscode.Uri.parse(backupId) : uri
 		logger.info(`Creating NBT document [uri=${JSON.stringify(dataFile)}]`)
-		const fileData = await NbtDocument.readFile(dataFile, logger)
+		// parse the backup bytes but detect the format from the original uri
+		const fileData = await NbtDocument.readFile(dataFile, logger, uri)
 		return new NbtDocument(uri, fileData, logger)
 	}
 
-	private static async readFile(uri: vscode.Uri, logger: Logger): Promise<NbtFile | NbtRegion> {
+	private static async readFile(uri: vscode.Uri, logger: Logger, formatUri: vscode.Uri = uri): Promise<NbtFile | NbtRegion> {
 		const array = await vscode.workspace.fs.readFile(uri)
 
 		logger.info(`Read file [length=${array.length}, scheme=${uri.scheme}, extension=${uri.path.match(/(?:\.([^.]+))?$/)?.[1]}]`)
@@ -51,11 +52,11 @@ export class NbtDocument extends Disposable implements vscode.CustomDocument {
 			return NbtFile.create()
 		}
 
-		if (uri.fsPath.endsWith('.mca')) {
+		if (formatUri.fsPath.endsWith('.mca')) {
 			return NbtRegion.read(array)
 		}
 
-		let littleEndian = uri.fsPath.endsWith('.mcstructure')
+		let littleEndian = formatUri.fsPath.endsWith('.mcstructure')
 		let file: NbtFile
 		try {
 			file = NbtFile.read(array, { littleEndian, bedrockHeader: littleEndian })
@@ -92,8 +93,6 @@ export class NbtDocument extends Disposable implements vscode.CustomDocument {
 	private readonly _isStructure: boolean
 	private readonly _isMap: boolean
 	private readonly _isReadOnly: boolean
-	private _edits: NbtEdit[] = []
-	private _savedEdits: NbtEdit[] = []
 
 	private constructor(
 		uri: vscode.Uri,
@@ -147,6 +146,12 @@ export class NbtDocument extends Disposable implements vscode.CustomDocument {
 	private readonly _onDidChangeDocument = this._register(new vscode.EventEmitter<NbtEdit>())
 	public readonly onDidChangeContent = this._onDidChangeDocument.event
 
+	private _epoch = 0
+
+	// fired when the webviews must reload the full state
+	private readonly _onDidReset = this._register(new vscode.EventEmitter<void>())
+	public readonly onDidReset = this._onDidReset.event
+
 	private readonly _onDidChange = this._register(new vscode.EventEmitter<{
 		readonly label: string,
 		undo(): void,
@@ -165,22 +170,26 @@ export class NbtDocument extends Disposable implements vscode.CustomDocument {
 			return
 		}
 
-		this._edits.push(edit)
 		applyEdit(this._documentData, edit, this.logger)
 		const reversed = reverseEdit(edit)
+		const epoch = this._epoch
+		const run = (e: NbtEdit) => {
+			if (epoch !== this._epoch) {
+				return // stale entry from before a revert
+			}
+			try {
+				applyEdit(this._documentData, e, this.logger)
+			} catch (err) {
+				this._onDidReset.fire()
+				throw err
+			}
+			this._onDidChangeDocument.fire(e)
+		}
 
 		this._onDidChange.fire({
 			label: 'Edit',
-			undo: async () => {
-				this._edits.pop()
-				applyEdit(this._documentData, reversed, this.logger)
-				this._onDidChangeDocument.fire(reversed)
-			},
-			redo: async () => {
-				this._edits.push(edit)
-				applyEdit(this._documentData, edit, this.logger)
-				this._onDidChangeDocument.fire(edit)
-			},
+			undo: async () => run(reversed),
+			redo: async () => run(edit),
 		})
 		this._onDidChangeDocument.fire(edit)
 	}
@@ -219,33 +228,29 @@ export class NbtDocument extends Disposable implements vscode.CustomDocument {
 	}
 
 	async save(cancellation: vscode.CancellationToken): Promise<void> {
-		await this.saveAs(this.uri, cancellation)
-		this._savedEdits = Array.from(this._edits)
-	}
-
-	async saveAs(targetResource: vscode.Uri, cancellation: vscode.CancellationToken): Promise<void> {
-		if (this._savedEdits.length === this._edits.length) {
-			return
-		}
 		if (this._isReadOnly) {
 			return
 		}
+		await this.saveAs(this.uri, cancellation)
+	}
 
-		const nbtFile = this._documentData
+	async saveAs(targetResource: vscode.Uri, cancellation: vscode.CancellationToken): Promise<void> {
 		if (cancellation.isCancellationRequested) {
-			return
+			throw new vscode.CancellationError()
 		}
 
-		const fileData = nbtFile.write()
+		const fileData = this._documentData.write()
+		if (cancellation.isCancellationRequested) {
+			throw new vscode.CancellationError()
+		}
 
 		await vscode.workspace.fs.writeFile(targetResource, fileData)
 	}
 
 	async revert(_cancellation: vscode.CancellationToken): Promise<void> {
-		const diskContent = await NbtDocument.readFile(this.uri, this.logger)
-		this._documentData = diskContent
-		this._edits = this._savedEdits
-		// TODO: notify listeners that document has reset
+		this._documentData = await NbtDocument.readFile(this.uri, this.logger)
+		this._epoch++
+		this._onDidReset.fire()
 	}
 
 	async backup(destination: vscode.Uri, cancellation: vscode.CancellationToken): Promise<vscode.CustomDocumentBackup> {
