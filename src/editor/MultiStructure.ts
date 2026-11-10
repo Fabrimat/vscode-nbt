@@ -39,7 +39,6 @@ export class MultiStructure implements StructureProvider {
 				}))
 			} catch (e) {
 				if (e instanceof Error) {
-					console.log((r.structure as Structure)['blocks'])
 					e.message = e.message.replace(' in structure ', ` in structure region "${r.name}" `)
 				}
 				throw e

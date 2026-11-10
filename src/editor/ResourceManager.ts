@@ -55,7 +55,7 @@ export class ResourceManager implements BlockDefinitionProvider, BlockModelProvi
 	}
 
 	public getBlockProperties(id: Identifier) {
-		return this.blocks[id.toString()]?.properties ?? null
+		return this.blocks.get(id.toString())?.properties ?? null
 	}
 
 	public getDefaultBlockProperties(id: Identifier) {

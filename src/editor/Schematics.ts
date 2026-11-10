@@ -1,6 +1,7 @@
 import type { BlockPos } from 'deepslate'
-import { BlockState, NbtCompound, NbtIntArray, NbtType, Structure } from 'deepslate'
+import { BlockState, NbtCompound, NbtType, Structure } from 'deepslate'
 import { fromAlphaMaterial } from './AlphaMaterials'
+import { OPAQUE_BLOCKS } from './BlockFlags'
 import type { StructureRegion } from './MultiStructure'
 import { MultiStructure } from './MultiStructure'
 
@@ -8,42 +9,73 @@ function getTriple(tag: NbtCompound): BlockPos {
 	return [tag.getNumber('x'), tag.getNumber('y'), tag.getNumber('z')]
 }
 
-export function spongeToStructure(root: NbtCompound) {
-	const width = root.getNumber('Width')
-	const height = root.getNumber('Height')
-	const length = root.getNumber('Length')
+const AIR = new Set(['minecraft:air', 'minecraft:cave_air', 'minecraft:void_air'])
+// Air is only dropped for large structures, where invisible blocks are unavailable anyway
+export const shouldSkipAir = (width: number, height: number, length: number) => width * height * length > 48 * 48 * 48
+const isAir = (state: BlockState) => AIR.has(state.getName().toString())
+const isAirArray = (palette: BlockState[]) => palette.map(isAir)
 
-	const schemPalette = root.getCompound('Palette')
+type RawBlock = { pos: BlockPos, state: number, nbt?: NbtCompound }
+
+// Sponge v3 nests everything under `Schematic`, with the block data under `Blocks`
+function spongeBlocksTag(root: NbtCompound) {
+	return root.hasCompound('Schematic') ? root.getCompound('Schematic') : root
+}
+
+export function isSponge(root: NbtCompound) {
+	const schem = spongeBlocksTag(root)
+	if (schem.hasCompound('Blocks')) {
+		return schem.getCompound('Blocks').get('Data')?.isByteArray() === true
+	}
+	return schem.get('BlockData')?.isByteArray() === true && schem.hasCompound('Palette')
+}
+
+export function spongeToStructure(root: NbtCompound) {
+	const schem = spongeBlocksTag(root)
+	const width = schem.getNumber('Width')
+	const height = schem.getNumber('Height')
+	const length = schem.getNumber('Length')
+	const v3 = schem.hasCompound('Blocks')
+	const blocksTag = v3 ? schem.getCompound('Blocks') : schem
+
+	const schemPalette = blocksTag.getCompound('Palette')
 	const palette: BlockState[] = []
 	for (const key of schemPalette.keys()) {
-		const id = schemPalette.getNumber(key)
-		palette[id] = BlockState.parse(key)
+		palette[schemPalette.getNumber(key)] = BlockState.parse(key)
 	}
+	const air = isAirArray(palette)
+	const skipAir = shouldSkipAir(width, height, length)
 
-	const blockData = root.getByteArray('BlockData').map(e => e.getAsNumber())
-	const blockEntities = new Map<string, NbtCompound>()
-	root.getList('BlockEntities', NbtType.Compound).forEach((tag) => {
-		const pos = tag.getIntArray('Pos').toString()
+	const blockData = blocksTag.getByteArray(v3 ? 'Data' : 'BlockData').map(e => e.getAsNumber())
+	const blockEntities = new Map<number, NbtCompound>()
+	const beKey = v3 || blocksTag.has('BlockEntities') ? 'BlockEntities' : 'TileEntities'
+	blocksTag.getList(beKey, NbtType.Compound).forEach((tag) => {
+		const [x, y, z] = tag.getIntArray('Pos').map(e => e.getAsNumber())
 		const copy = NbtCompound.fromJson(tag.toJson())
 		copy.delete('Pos')
-		blockEntities.set(pos, copy)
+		blockEntities.set(x + z * width + y * width * length, copy)
 	})
-	const blocks: { pos: BlockPos, state: number, nbt?: NbtCompound }[] = []
+	const blocks: RawBlock[] = []
 	let i = 0
+	const total = blockData.length
 	for (let y = 0; y < height; y += 1) {
 		for (let z = 0; z < length; z += 1) {
 			for (let x = 0; x < width; x += 1) {
-				let id = blockData[i] ?? 0
-				i += 1
-				if (id > 127) {
-					id += ((blockData[i] ?? 0) - 1) << 7
+				// varint, bytes are signed in NBT so mask them
+				let id = 0
+				let shift = 0
+				while (i < total) {
+					const b = blockData[i] & 0xFF
 					i += 1
+					id |= (b & 0x7F) << shift
+					shift += 7
+					if ((b & 0x80) === 0) break
 				}
-				const pos = new NbtIntArray([x, y, z]).toString()
+				if (skipAir && air[id]) continue
 				blocks.push({
 					pos: [x, y, z],
 					state: id,
-					nbt: blockEntities.get(pos),
+					nbt: blockEntities.get(x + z * width + y * width * length),
 				})
 			}
 		}
@@ -57,7 +89,10 @@ export function litematicToStructure(root: NbtCompound) {
 	const [width, height, length] = getTriple(enclosingSize)
 
 	const regions: StructureRegion[] = []
-	root.getCompound('Regions').forEach((name, region) => {
+	const regionsTag = root.getCompound('Regions')
+	// Air in overlapping regions would hide blocks of the regions below it
+	const skipAir = [...regionsTag.keys()].length > 1 || shouldSkipAir(width, height, length)
+	regionsTag.forEach((name, region) => {
 		if (!region.isCompound()) return
 		const pos = getTriple(region.getCompound('Position'))
 		const size = getTriple(region.getCompound('Size'))
@@ -86,7 +121,7 @@ export function litematicToStructure(root: NbtCompound) {
 		const big64 = BigInt(64)
 		const bitMask = BigInt(Math.pow(2, bits) - 1)
 		let state = 0
-		let data = statesData[state]
+		let data = statesData[state] ?? big0
 		let dataLength = big64
 
 		const arr: number[] = []
@@ -116,7 +151,8 @@ export function litematicToStructure(root: NbtCompound) {
 			data >>= bigBits
 			dataLength -= bigBits
 		}
-		const blocks: { pos: BlockPos, state: number, nbt?: NbtCompound }[] = []
+		const air = skipAir ? isAirArray(palette) : []
+		const blocks: RawBlock[] = []
 		const blockEntities = new Map<string, NbtCompound>()
 		region.getList('TileEntities', NbtType.Compound).forEach((tag) => {
 			const pos = getTriple(tag).toString()
@@ -126,15 +162,17 @@ export function litematicToStructure(root: NbtCompound) {
 			copy.delete('z')
 			blockEntities.set(pos, copy)
 		})
+		const hasEntities = blockEntities.size > 0
 		for (let x = 0; x < size[0]; x += 1) {
 			for (let y = 0; y < size[1]; y += 1) {
 				for (let z = 0; z < size[2]; z += 1) {
 					const index = (y * size[0] * size[2]) + z * size[0] + x
-					const pos = [x, y, z].toString()
+					const id = arr[index]
+					if (air[id]) continue
 					blocks.push({
 						pos: [x, y, z],
-						state: arr[index],
-						nbt: blockEntities.get(pos),
+						state: id,
+						nbt: hasEntities ? blockEntities.get([x, y, z].toString()) : undefined,
 					})
 				}
 			}
@@ -183,19 +221,40 @@ export function mcstructureToStructure(root: NbtCompound) {
 
 	const blockPositionData = defaultPalette.getCompound('block_position_data')
 
-	const indices = structureCompound.getList('block_indices', NbtType.List).getList(0, NbtType.Int).map(e => e.getAsNumber())
+	const layers = structureCompound.getList('block_indices', NbtType.List)
+	const indices = layers.getList(0, NbtType.Int).map(e => e.getAsNumber())
+	// Layer 1 holds liquids, waterlogged blocks are stored as water in this layer
+	const liquid = layers.length > 1 ? layers.getList(1, NbtType.Int).map(e => e.getAsNumber()) : []
+	const air = isAirArray(palette)
+	const skipAir = shouldSkipAir(width, height, length)
+	const waterlogged = new Map<number, number>()
 
-	const blocks: { pos: BlockPos, state: number, nbt?: NbtCompound }[] = []
+	const blocks: RawBlock[] = []
 	for (let x = 0; x < width; x += 1) {
 		for (let y = 0; y < height; y += 1) {
 			for (let z = 0; z < length; z += 1) {
 				const i = (x * height + y) * length + z
-				const state = indices[i]
-				if (state === undefined || state === -1) continue
-				if (state > palette.length - 1) {
-					console.error(`Invalid palette ID ${state}`)
-					continue
+				let state = indices[i]
+				if (state === undefined || state < 0 || state > palette.length - 1) {
+					if (state !== undefined && state >= 0) console.error(`Invalid palette ID ${state}`)
+					state = -1
 				}
+				const liquidState = liquid[i]
+				if (liquidState !== undefined && liquidState >= 0 && liquidState < palette.length
+					&& palette[liquidState].getName().toString() === 'minecraft:water') {
+					if (state === -1 || air[state]) {
+						state = liquidState
+					} else if (!OPAQUE_BLOCKS.has(palette[state].getName().toString())) {
+						let wl = waterlogged.get(state)
+						if (wl === undefined) {
+							wl = palette.length
+							palette.push(new BlockState(palette[state].getName(), { ...palette[state].getProperties(), waterlogged: 'true' }))
+							waterlogged.set(state, wl)
+						}
+						state = wl
+					}
+				}
+				if (state === -1 || (skipAir && air[state])) continue
 				const blockData = blockPositionData.hasCompound(String(i)) ? blockPositionData.getCompound(String(i)) : undefined
 				const blockEntityTag = blockData?.hasCompound('block_entity_data') ? blockData.getCompound('block_entity_data') : undefined
 				const nbt = blockEntityTag ? NbtCompound.fromJson(blockEntityTag.toJson()) : undefined
@@ -211,9 +270,11 @@ export function schematicToStructure(root: NbtCompound) {
 	const width = root.getNumber('Width')
 	const height = root.getNumber('Height')
 	const length = root.getNumber('Length')
-	
+
 	const blocksArray = root.getByteArray('Blocks').map(e => e.getAsNumber())
 	const dataArray = root.getByteArray('Data').map(e => e.getAsNumber())
+	// AddBlocks stores the high 4 bits of the id, two blocks per byte (even index in the low nibble)
+	const addArray = root.has('AddBlocks') ? root.getByteArray('AddBlocks').map(e => e.getAsNumber()) : []
 
 	const blockEntities = new Map<string, NbtCompound>()
 	root.getList('TileEntities', NbtType.Compound).forEach((tag) => {
@@ -224,18 +285,38 @@ export function schematicToStructure(root: NbtCompound) {
 		copy.delete('z')
 		blockEntities.set(pos, copy)
 	})
+	const hasEntities = blockEntities.size > 0
 
-	const structure = new Structure([width, height, length])
+	const skipAir = shouldSkipAir(width, height, length)
+	const palette: BlockState[] = []
+	const paletteIds = new Map<number, number>() // id << 4 | data -> palette index, -1 for air
+	const blocks: RawBlock[] = []
 	for (let x = 0; x < width; x += 1) {
 		for (let y = 0; y < height; y += 1) {
 			for (let z = 0; z < length; z += 1) {
 				const i = (y * width * length) + z * width + x
-				const blockStata = fromAlphaMaterial(blocksArray[i], dataArray[i])
-				const nbt = blockEntities.get([x, y, z].toString())
-				structure.addBlock([x, y, z], blockStata.getName(), blockStata.getProperties(), nbt)
+				let id = (blocksArray[i] ?? 0) & 0xFF
+				const add = addArray[i >> 1]
+				if (add !== undefined) {
+					id |= (((i & 1) === 0 ? add : add >> 4) & 0xF) << 8
+				}
+				const key = id << 4 | ((dataArray[i] ?? 0) & 0xF)
+				let state = paletteIds.get(key)
+				if (state === undefined) {
+					const blockState = fromAlphaMaterial(id, key & 0xF)
+					if (skipAir && isAir(blockState)) {
+						state = -1
+					} else {
+						state = palette.length
+						palette.push(blockState)
+					}
+					paletteIds.set(key, state)
+				}
+				if (state === -1) continue
+				blocks.push({ pos: [x, y, z], state, nbt: hasEntities ? blockEntities.get([x, y, z].toString()) : undefined })
 			}
 		}
 	}
 
-	return structure
+	return new Structure([width, height, length], palette, blocks)
 }

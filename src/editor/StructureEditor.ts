@@ -1,12 +1,12 @@
 import type { StructureProvider } from 'deepslate'
-import { BlockPos, NbtFile, NbtInt, NbtType, Structure, StructureRenderer } from 'deepslate'
+import { BlockPos, BlockState, NbtFile, NbtInt, NbtType, Structure, StructureRenderer } from 'deepslate'
 import { mat4, vec2, vec3 } from 'gl-matrix'
 import { mapEdit } from '../common/Operations'
 import type { NbtEdit } from '../common/types'
 import type { EditHandler, EditorPanel, VSCode } from './Editor'
 import { locale } from './Locale'
 import { ResourceManager } from './ResourceManager'
-import { litematicToStructure, mcstructureToStructure, schematicToStructure, spongeToStructure } from './Schematics'
+import { isSponge, litematicToStructure, mcstructureToStructure, schematicToStructure, spongeToStructure } from './Schematics'
 import { TreeEditor } from './TreeEditor'
 import { clamp, clampVec3, negVec3 } from './Util'
 
@@ -83,23 +83,20 @@ export class StructureEditor implements EditorPanel {
 		this.invisibleBlocksActive = false
 		this.selectedBlock = null
 
-		let dragTime: number
-		let dragPos: [number, number] | null = null
-		let dragButton: number
 		this.canvas.addEventListener('mousedown', evt => {
-			dragTime = Date.now()
-			dragPos = [evt.clientX, evt.clientY]
-			dragButton = evt.button
+			this.dragTime = Date.now()
+			this.dragPos = [evt.clientX, evt.clientY]
+			this.dragButton = evt.button
 		})
 		this.canvas.addEventListener('mousemove', evt => {
-			if (dragPos) {
-				const dx = (evt.clientX - dragPos[0]) / 100
-				const dy = (evt.clientY - dragPos[1]) / 100
-				if (dragButton === 0) {
+			if (this.dragPos) {
+				const dx = (evt.clientX - this.dragPos[0]) / 100
+				const dy = (evt.clientY - this.dragPos[1]) / 100
+				if (this.dragButton === 0) {
 					vec2.add(this.cRot, this.cRot, [dx, dy])
 					this.cRot[0] = this.cRot[0] % (Math.PI * 2)
 					this.cRot[1] = clamp(this.cRot[1], -Math.PI / 2, Math.PI / 2)
-				} else if (dragButton === 2 || dragButton === 1) {
+				} else if (this.dragButton === 2 || this.dragButton === 1) {
 					vec3.rotateY(this.cPos, this.cPos, [0, 0, 0], this.cRot[0])
 					vec3.rotateX(this.cPos, this.cPos, [0, 0, 0], this.cRot[1])
 					const d = vec3.fromValues(dx, -dy, 0)
@@ -111,16 +108,8 @@ export class StructureEditor implements EditorPanel {
 				} else {
 					return
 				}
-				dragPos = [evt.clientX, evt.clientY]
+				this.dragPos = [evt.clientX, evt.clientY]
 				this.render()
-			}
-		})
-		this.canvas.addEventListener('mouseup', evt => {
-			dragPos = null
-			if (Date.now() - dragTime < 200) {
-				if (dragButton === 0) {
-					this.selectBlock(evt.clientX, evt.clientY)
-				}
 			}
 		})
 		this.canvas.addEventListener('wheel', evt => {
@@ -129,6 +118,7 @@ export class StructureEditor implements EditorPanel {
 			this.render()
 		})
 
+		window.addEventListener('blur', () => this.movement.fill(0))
 		window.addEventListener('resize', () => {
 			if (this.resize()) this.render()
 		})
@@ -201,18 +191,22 @@ export class StructureEditor implements EditorPanel {
 		this.showSidePanel()
 		document.addEventListener('keydown', this.onKeyDown)
 		document.addEventListener('keyup', this.onKeyUp)
+		window.addEventListener('mouseup', this.onMouseUp)
 	}
 
 	hide() {
 		document.removeEventListener('keydown', this.onKeyDown)
 		document.removeEventListener('keyup', this.onKeyUp)
+		window.removeEventListener('mouseup', this.onMouseUp)
+		this.movement.fill(0)
+		this.dragPos = null
 	}
 
 	onInit(file: NbtFile) {
 		this.updateStructure(file)
 		vec3.copy(this.cPos, this.structure.getSize())
 		vec3.scale(this.cPos, this.cPos, -0.5)
-		this.cDist = vec3.dist([0, 0, 0], this.cPos) * 1.5
+		this.cDist = Math.max(vec3.dist([0, 0, 0], this.cPos) * 1.5, 5)
 		this.render()
 	}
 
@@ -220,6 +214,18 @@ export class StructureEditor implements EditorPanel {
 		this.updateStructure(file)
 		this.showSidePanel()
 		this.render()
+	}
+
+	private dragTime = 0
+	private dragPos: [number, number] | null = null
+	private dragButton = 0
+
+	private readonly onMouseUp = (evt: MouseEvent) => {
+		if (!this.dragPos) return
+		this.dragPos = null
+		if (Date.now() - this.dragTime < 200 && this.dragButton === 0 && evt.target === this.canvas) {
+			this.selectBlock(evt.clientX, evt.clientY)
+		}
 	}
 
 	private readonly onKeyDown = (evt: KeyboardEvent) => {
@@ -260,7 +266,7 @@ export class StructureEditor implements EditorPanel {
 	}
 
 	protected loadStructure() {
-		if (this.file.root.get('BlockData')?.isByteArray() && this.file.root.hasCompound('Palette')) {
+		if (isSponge(this.file.root)) {
 			return spongeToStructure(this.file.root)
 		}
 		if (this.file.root.hasCompound('Regions')) {
@@ -272,7 +278,17 @@ export class StructureEditor implements EditorPanel {
 		if (this.file.root.hasCompound('structure') && this.file.root.hasList('size', NbtType.Int, 3)) {
 			return mcstructureToStructure(this.file.root)
 		}
-		return Structure.fromNbt(this.file.root)
+		const root = this.file.root
+		if (!root.hasList('palette') && root.hasList('palettes', NbtType.List)) {
+			// Structures with multiple palettes (e.g. shipwrecks), use the first one
+			const palette = root.getList('palettes', NbtType.List).getList(0, NbtType.Compound).map(tag => BlockState.fromNbt(tag))
+			const blocks = root.getList('blocks', NbtType.Compound).map(tag => {
+				const nbt = tag.getCompound('nbt')
+				return { pos: BlockPos.fromNbt(tag.getList('pos')), state: tag.getNumber('state'), nbt: nbt.size > 0 ? nbt : undefined }
+			})
+			return new Structure(BlockPos.fromNbt(root.getList('size')), palette, blocks)
+		}
+		return Structure.fromNbt(root)
 	}
 
 	private buildStructure() {
@@ -345,18 +361,28 @@ export class StructureEditor implements EditorPanel {
 		this.root.append(sidePanel)
 		if (block) {
 			const properties = block.state.getProperties()
-			sidePanel.innerHTML = `
-				<div class="block-name">${block.state.getName()}</div>
-				<div class="block-pos">${block.pos.join(' ')}</div>
-				${Object.keys(properties).length === 0 ? '' : `
-					<div class="block-props">
-					${Object.entries(properties).map(([k, v]) => `
-						<span class="prop-key">${k}</span>
-						<span class="prop-value">${v}</span>
-					`).join('')}
-					</div>
-				`}
-			`
+			const name = document.createElement('div')
+			name.className = 'block-name'
+			name.textContent = block.state.getName().toString()
+			const pos = document.createElement('div')
+			pos.className = 'block-pos'
+			pos.textContent = block.pos.join(' ')
+			sidePanel.append(name, pos)
+			const entries = Object.entries(properties)
+			if (entries.length > 0) {
+				const props = document.createElement('div')
+				props.className = 'block-props'
+				for (const [k, v] of entries) {
+					const key = document.createElement('span')
+					key.className = 'prop-key'
+					key.textContent = k
+					const value = document.createElement('span')
+					value.className = 'prop-value'
+					value.textContent = v
+					props.append(key, value)
+				}
+				sidePanel.append(props)
+			}
 			if (block.nbt) {
 				const nbtTree = document.createElement('div')
 				sidePanel.append(nbtTree)
@@ -385,11 +411,16 @@ export class StructureEditor implements EditorPanel {
 				if (readOnly) return
 
 				el.addEventListener('change', () => {
+					const value = parseInt((el as HTMLInputElement).value)
+					if (!Number.isInteger(value) || value <= 0) {
+						(el as HTMLInputElement).value = original.toString()
+						return
+					}
 					this.editHandler({
 						type: 'set',
 						path: ['size', i],
 						old: new NbtInt(original).toJsonWithId(),
-						new: new NbtInt(parseInt((el as HTMLInputElement).value)).toJsonWithId(),
+						new: new NbtInt(value).toJsonWithId(),
 					})
 				})
 			})
