@@ -460,7 +460,7 @@ class Editor {
 	}
 
 	private doReplaceAll() {
-		if (!this.searchResults) return
+		if (!this.searchResults?.length) return
 		const query = this.getQuery(this.findWidget.querySelector('.replace-part'))
 		if (query.name || query.value || query.type) {
 			const edits = this.searchResults.map(r => r.replace(query))
@@ -490,7 +490,7 @@ class Editor {
 			this.searchResults[this.searchIndex].show()
 		}
 		this.findWidget.classList.toggle('no-results', this.searchResults !== null && this.searchResults.length === 0)
-		this.findWidget.querySelectorAll('.previous-match, .next-match').forEach(e =>
+		this.findWidget.querySelectorAll('.previous-match, .next-match, .replace, .replace-all').forEach(e =>
 			e.classList.toggle('disabled', this.searchResults === null || this.searchResults.length === 0))
 	}
 

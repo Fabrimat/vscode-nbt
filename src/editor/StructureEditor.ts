@@ -223,6 +223,7 @@ export class StructureEditor implements EditorPanel {
 	}
 
 	private readonly onKeyDown = (evt: KeyboardEvent) => {
+		if ((evt.target as HTMLElement | null)?.closest('input, textarea, select')) return
 		const index = this.movementKeys.indexOf(evt.code)
 		if (index !== -1) {
 			this.movement[index] = 1
