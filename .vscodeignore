@@ -14,3 +14,4 @@ src/**
 .eslintrc.js
 tsconfig*.json
 out/**/*.map
+docs/**

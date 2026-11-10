@@ -1,7 +1,7 @@
 # NBT Plus for VS Code
 View and edit Minecraft NBT files in VS Code, with a 3D block view for structures.
 
-![](https://user-images.githubusercontent.com/17352009/104337363-b4aeb000-54f5-11eb-93a2-47ce2e3e4fea.png)
+![3D structure view](docs/images/structure.png)
 
 This is a maintained continuation (fork) of [NBT Viewer](https://github.com/misode/vscode-nbt) by [Misode](https://github.com/misode).
 
@@ -13,6 +13,10 @@ This is a maintained continuation (fork) of [NBT Viewer](https://github.com/miso
 * Region file (`.mca`) support
 * Map rendering
 * Java (big-endian) and Bedrock (little-endian) NBT
+
+![Tree view](docs/images/tree.png)
+
+![SNBT view](docs/images/snbt.png)
 
 ## Supported files
 
