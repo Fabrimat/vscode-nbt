@@ -12,7 +12,7 @@ export class NbtEditorProvider implements vscode.CustomEditorProvider<NbtDocumen
 
 	public static register(context: vscode.ExtensionContext, logger: Logger): vscode.Disposable {
 		return vscode.window.registerCustomEditorProvider(
-			'nbtEditor.nbt',
+			'vscodeNbtPlus.editor',
 			new NbtEditorProvider(context, logger),
 			{
 				webviewOptions: {

@@ -10,3 +10,7 @@ src/**
 **/.eslintrc.json
 **/*.map
 **/*.ts
+.github/**
+.eslintrc.js
+tsconfig*.json
+out/**/*.map

@@ -1,22 +1,22 @@
 {
-	"name": "vscode-nbt",
-	"displayName": "NBT Viewer",
-	"description": "View Minecraft NBT and 3D structures",
-	"version": "0.9.7",
-	"preview": true,
-	"publisher": "Misodee",
+	"name": "vscode-nbt-plus",
+	"displayName": "VSCode NBT Plus",
+	"description": "View and edit Minecraft NBT (Java & Bedrock) with a 3D structure viewer for .nbt, .mcstructure, .litematic, .schem and .schematic files, plus region (.mca) support",
+	"version": "1.0.0",
+	"publisher": "Fabrimat",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/misode/vscode-nbt.git"
+		"url": "https://github.com/Fabrimat/vscode-nbt.git"
 	},
 	"engines": {
 		"vscode": "^1.46.0"
 	},
 	"categories": [
+		"Visualization",
 		"Other"
 	],
 	"activationEvents": [
-		"onCustomEditor:nbtEditor.nbt"
+		"onCustomEditor:vscodeNbtPlus.editor"
 	],
 	"main": "./out/extension.js",
 	"capabilities": {
@@ -27,8 +27,8 @@
 	"contributes": {
 		"customEditors": [
 			{
-				"viewType": "nbtEditor.nbt",
-				"displayName": "NBT Viewer",
+				"viewType": "vscodeNbtPlus.editor",
+				"displayName": "NBT Editor",
 				"selector": [
 					{
 						"filenamePattern": "*.nbt"
@@ -63,7 +63,8 @@
 		"vscode:prepublish": "npm run build",
 		"build": "rollup --config",
 		"dev": "rollup --config --watch",
-		"lint": "eslint . --ext .ts"
+		"lint": "eslint . --ext .ts",
+		"package": "vsce package"
 	},
 	"dependencies": {
 		"deepslate": "^0.26.1",
@@ -83,9 +84,35 @@
 		"@types/vscode": "^1.46.0",
 		"@typescript-eslint/eslint-plugin": "^5.3.1",
 		"@typescript-eslint/parser": "^5.3.1",
+		"@vscode/vsce": "^4.1.0",
 		"eslint": "^8.2.0",
+		"ovsx": "^1.4.0",
 		"rollup": "^2.59.0",
 		"ts-node": "^10.4.0",
 		"typescript": "^4.4.4"
+	},
+	"license": "MIT",
+	"icon": "res/icon.png",
+	"homepage": "https://github.com/Fabrimat/vscode-nbt#readme",
+	"bugs": {
+		"url": "https://github.com/Fabrimat/vscode-nbt/issues"
+	},
+	"keywords": [
+		"minecraft",
+		"nbt",
+		"snbt",
+		"mcstructure",
+		"bedrock",
+		"litematic",
+		"schematic",
+		"schem",
+		"region",
+		"mca",
+		"structure",
+		"3d"
+	],
+	"galleryBanner": {
+		"color": "#1e1e1e",
+		"theme": "dark"
 	}
 }
