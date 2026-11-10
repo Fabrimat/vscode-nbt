@@ -11,6 +11,9 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -19,8 +22,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx vsce package -o vscode-nbt-plus.vsix
-      - run: npx vsce publish --packagePath vscode-nbt-plus.vsix -p ${{ secrets.VSCE_PAT }}
-      - run: npx ovsx publish vscode-nbt-plus.vsix -p ${{ secrets.OVSX_PAT }}
+      - if: env.VSCE_PAT != ''
+        run: npx vsce publish --packagePath vscode-nbt-plus.vsix -p "$VSCE_PAT"
+      - if: env.OVSX_PAT != ''
+        run: npx ovsx publish vscode-nbt-plus.vsix -p "$OVSX_PAT"
       - uses: softprops/action-gh-release@v2
         with:
           files: vscode-nbt-plus.vsix
